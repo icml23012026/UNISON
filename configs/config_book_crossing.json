@@ -1,36 +1,53 @@
 {
-  "experiment_name": "UNISON_BookCrossing",
-  "device": "cuda",
   "data": {
-    "train_path": "data/episodes/N_SUP_5/wu_wi",
-    "val_wu_path": "data/episodes/N_SUP_5/wu_ci",
-    "val_cu_path": "data/episodes/N_SUP_5/cu_mixed",
-    "embeddings": "embeddings/item2vec_books_qwen2_5_7b.pkl",
-    "batch_size": 16
+    "train_data_path": "episodes_books/N_SUP_10/wu_wi",
+    "val_wu_data_path": "episodes_books/N_SUP_40/wu_ci",
+    "val_cu_data_path": "episodes_books/N_SUP_40/cu_mixed",
+    "embedding_path": "data/embeddings/item2vec_books_qwen.pkl",
+    "batch_size": 16,
+    "num_workers": 0
   },
+
   "model": {
     "d_in": 3584,
     "d_model": 48,
     "mlp_hidden": [1536, 768, 384, 192, 96],
     "mlp_dropout": 0.15,
+    "mlp_use_batchnorm": false,
+    "mlp_use_layernorm": false,
+    "normalize_user": true,
+    "normalize_item": false
+  },
+
+  "task": {
     "item_task": "regression",
-    "scores_range": [1, 10],
-    "lambda_attr": 2.5,
+    "binarization_threshold": null,
+    "scores_range": [1.0, 10.0]
+  },
+
+  "stage3": {
     "is_user_attr_head": true,
-    "user_attr_task": "binary_classification",
+    "user_attr_task": "classification",
     "user_head_out_dim": 1,
-    "user_head_hidden": [32, 32, 32],
-    "user_head_dropout": [0.4, 0.4, 0.04]
+    "user_head_hidden": [32, 32],
+    "user_head_dropout": 0.2,
+    "user_head_activation": "relu",
+    "user_head_use_batchnorm": false,
+    "user_head_use_layernorm": false,
+    "lambda_attr": 2.5
   },
-  "adaptation": {
-    "steps": 151,
-    "lr": 7.8e-4,
-    "weight_decay": 8.6e-7,
-    "patience": 11
-  },
+
   "training": {
     "num_epochs": 87,
-    "lr": 3.4e-4,
-    "weight_decay": 4.3e-7
+    "learning_rate": 0.00034,
+    "weight_decay": 4.3e-7,
+    "device": "cuda"
+  },
+
+  "cold_start": {
+    "cold_steps": 151,
+    "cold_lr": 0.00078,
+    "cold_wd": 8.6e-7,
+    "cold_patience": 11
   }
 }

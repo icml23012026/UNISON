@@ -1,471 +1,540 @@
 """
-UNISON Framework - Training Module
+UNISON Training Script for Book-Crossing Dataset
 
-Orchestrates training and evaluation for:
-- Stage 2: Preference Modeling (warm users on items)
-- Stage 3: Bag Classification (cold users and attribute prediction)
+This script trains the UNISON framework on the Book-Crossing recommendation
+dataset with both Stage 2 (item scoring) and Stage 3 (user attribute prediction).
 
-Evaluation scenarios:
-- WU-CI: Warm User, Cold Item
-- CU-WI: Cold User, Warm Item
-- CU-CI: Cold User, Cold Item
-- CU-Attr: Cold User, Attribute Prediction
+Training Strategy:
+    - Stage 2 + Stage 3 joint training on WU-WI episodes
+    - Evaluation on WU-CI (warm user, cold items)
+    - Evaluation on CU-Mixed (cold user, mixed items) with separate metrics:
+        * CU-WI: Cold user, warm items
+        * CU-CI: Cold user, cold items
+
+Metrics:
+    - Stage 2: MAE (Mean Absolute Error), Spearman correlation
+    - Stage 3: AUC (for classification), Accuracy
+
+Usage:
+    python src/scripts/train_book_crossing.py --config configs/config_book_crossing.json
+
+Directory Structure (relative to project root):
+    configs/
+        config_book_crossing.json       # Configuration file
+    data/
+        embeddings/
+            item2vec_books_qwen.pkl     # Pre-computed item embeddings
+        episodes_books/
+            N_SUP_50/
+                wu_wi/                  # Training episodes
+                wu_ci/                  # Warm-user evaluation episodes
+                cu_mixed/               # Cold-user evaluation episodes
+    src/
+        scripts/
+            train_book_crossing.py      # This file
+    checkpoints/
+        book_crossing/                  # Saved models
 """
 
 import os
+import sys
 import json
-import torch
+import argparse
+from pathlib import Path
+from typing import Dict
+
 import numpy as np
-from tqdm import tqdm
+import torch
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
-# Framework Imports
-from src.data_prep.bag_loader_book_crossing import (
-    BookCrossingBagDataset,
-    collate_bags,
-)
-from src.model.framework import Unison
+# Add project root to path for imports
+project_root = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(project_root))
+
+from src.data_prep.episode_dataset_book_crossing import EpisodesDataset, collate_fn
+from src.model.framework import UNISON
 
 
-def load_config(path="configs/config_book_crossing.json"):
+# ============================================================
+# TRAINING FUNCTION
+# ============================================================
+def train_epoch(
+    model: UNISON,
+    optimizer: torch.optim.Optimizer,
+    train_loader: DataLoader,
+    lambda_attr: float,
+    device: str,
+) -> Dict[str, float]:
     """
-    Load experiment configuration from JSON file.
+    Train one epoch on WU-WI episodes (Stage 2 + Stage 3 jointly).
 
-    Parameters
-    ----------
-    path : str
-        Path to configuration file.
+    Args:
+        model: UNISON model instance
+        optimizer: PyTorch optimizer
+        train_loader: DataLoader for WU-WI training episodes
+        lambda_attr: Weight for Stage 3 loss (relative to Stage 2)
+        device: Device string ("cuda" or "cpu")
 
-    Returns
-    -------
-    dict
-        Configuration dictionary.
-    """
-    with open(path, "r") as f:
-        return json.load(f)
-
-
-def log_epoch(epoch, tr_metrics, wu_metrics, cu_metrics):
-    """
-    Print epoch metrics in a clean, structured format.
-
-    Parameters
-    ----------
-    epoch : int
-        Current epoch number.
-    tr_metrics : dict
-        Training metrics.
-    wu_metrics : dict
-        Warm user evaluation metrics.
-    cu_metrics : dict
-        Cold user evaluation metrics.
-    """
-    print(f"\n{'=' * 60}")
-    print(f"EPOCH {epoch:03d}")
-    print(f"{'=' * 60}")
-
-    # Training metrics
-    print(f"\n[TRAINING]")
-    print(f"  Total Loss:   {tr_metrics['loss']:.4f}")
-    print(f"  Rating Loss:  {tr_metrics['loss_ratings']:.4f}")
-    print(f"  Attr Loss:    {tr_metrics.get('loss_attr', 0):.4f}")
-    if 'attr_acc' in tr_metrics:
-        print(f"  Attr Acc:     {tr_metrics['attr_acc']:.2%}")
-
-    # Stage 2: Warm User - Cold Item
-    print(f"\n[STAGE 2] Item Scoring")
-    print(f"  WU-CI MAE:          {wu_metrics.get('mae', 0):.4f}")
-    print(f"  WU-CI Spearman:     {wu_metrics.get('spearman', 0):.4f}")
-    print(f"  CU-WI MAE:          {cu_metrics.get('mae_wi', 0):.4f}")
-    print(f"  CU-WI Spear:        {cu_metrics.get('spearman_wi', 0):.4f}")
-    print(f"  CU-CI MAE:          {cu_metrics.get('mae_ci', 0):.4f}")
-    print(f"  CU-CI Spear:        {cu_metrics.get('spearman_ci', 0):.4f}")
-
-    # Stage 3: Cold User - Items & Attributes
-    print(f"\n[STAGE 3: COLD USER Attribute]")
-    print(f"  Attr AUC:     {cu_metrics.get('attr_auc', 0):.4f}")
-    print(f"  Attr Acc:     {cu_metrics.get('attr_acc', 0):.2%}")
-
-    print(f"\n{'=' * 60}\n")
-
-
-def train_epoch(model, loader, optimizer, config, device):
-    """
-    Execute one training epoch for Stage 2 + Stage 3.
-
-    Jointly optimizes:
-    - User embeddings and item scoring (Stage 2)
-    - User attribute prediction head (Stage 3)
-
-    Parameters
-    ----------
-    model : UNISON
-        Model instance.
-    loader : DataLoader
-        Training data loader.
-    optimizer : torch.optim.Optimizer
-        Optimizer.
-    config : dict
-        Configuration dictionary.
-    device : torch.device
-        Device for computation.
-
-    Returns
-    -------
-    dict
-        Aggregated training metrics.
+    Returns:
+        Dictionary with training metrics:
+        - train_loss: Total loss
+        - train_loss_ratings: Stage 2 loss
+        - train_loss_attr: Stage 3 loss
+        - train_attr_accuracy: Stage 3 accuracy (if classification)
     """
     model.train()
-    metrics = {
-        "loss": 0,
-        "loss_ratings": 0,
-        "loss_attr": 0,
-        "attr_acc": [],
-    }
 
-    for batch in tqdm(loader, desc="Training", leave=False):
-        # Joint Stage 2 + Stage 3 training step
-        res = model.train_step_warm_user_item_and_attribute(
+    total_loss = 0.0
+    total_rating_loss = 0.0
+    total_attr_loss = 0.0
+    attr_correct = 0
+    attr_total = 0
+    n_batches = 0
+
+    for batch in tqdm(train_loader, desc="Training", leave=False):
+        # Move data to device
+        items_sup = batch["items_sup"].to(device)
+        scores_sup = batch["scores_sup"].to(device)
+        target_attr = batch["target_attr"].to(device)
+        user_ids = batch["id"]
+
+        # Forward + backward
+        result = model.train_step_warm_user_item_and_attribute(
             optimizer=optimizer,
-            user_ids=batch["id"],
-            items_sup=batch["items_sup"].to(device),
-            scores_sup=batch["scores_sup"].to(device),
-            target_attr=batch["target_attr"].to(device),
-            lambda_attr=config["model"]["lambda_attr"],
+            user_ids=user_ids,
+            items_sup=items_sup,
+            scores_sup=scores_sup,
+            target_attr=target_attr,
+            lambda_attr=lambda_attr,
         )
 
-        metrics["loss"] += res["loss_scaled"].item()
-        metrics["loss_ratings"] += res["loss_ratings"].item()
-        metrics["loss_attr"] += res["loss_attr"].item()
+        # Accumulate losses
+        total_loss += float(result["loss_scaled"])
+        total_rating_loss += float(result["loss_ratings"])
+        total_attr_loss += float(result["loss_attr"])
+        n_batches += 1
 
-        # Compute attribute accuracy (binary classification)
-        if "pred_attr" in res:
-            preds = (res["pred_attr"] >= 0.5).float()
-            acc = (preds == batch["target_attr"].to(device)).float().mean().item()
-            metrics["attr_acc"].append(acc)
+        # Compute accuracy for classification
+        if model.user_attr_task == "classification":
+            with torch.no_grad():
+                pred_attr = result["pred_attr"]  # Probabilities
+                tgt_attr = result["target_attr"]
 
-    # Average over batches
-    metrics["loss"] /= len(loader)
-    metrics["loss_ratings"] /= len(loader)
-    metrics["loss_attr"] /= len(loader)
-    metrics["attr_acc"] = np.mean(metrics["attr_acc"]) if metrics["attr_acc"] else 0
+                # Binary classification: threshold at 0.5
+                if pred_attr.dim() == 1 or pred_attr.size(-1) == 1:
+                    preds = (pred_attr >= 0.5).long()
+                    labels = tgt_attr.squeeze(-1).long() if tgt_attr.dim() > 1 else tgt_attr.long()
+                else:
+                    # Multiclass: argmax
+                    preds = pred_attr.argmax(dim=-1)
+                    labels = tgt_attr.squeeze(-1).long() if tgt_attr.dim() > 1 else tgt_attr.long()
+
+                attr_correct += (preds == labels).sum().item()
+                attr_total += labels.numel()
+
+    # Compute averages
+    metrics = {
+        "train_loss": total_loss / max(n_batches, 1),
+        "train_loss_ratings": total_rating_loss / max(n_batches, 1),
+        "train_loss_attr": total_attr_loss / max(n_batches, 1),
+    }
+
+    if attr_total > 0:
+        metrics["train_attr_accuracy"] = attr_correct / attr_total
 
     return metrics
 
 
-def evaluate_warm_user(model, loader, device):
+# ============================================================
+# EVALUATION FUNCTIONS
+# ============================================================
+def evaluate_warm_user_cold_item(
+    model: UNISON,
+    eval_loader: DataLoader,
+    device: str,
+) -> Dict[str, float]:
     """
-    Evaluate Stage 2: Warm User, Cold Item (WU-CI).
+    Evaluate Stage 2 on WU-CI episodes (warm users, cold items).
 
-    Uses learned user embeddings to score items not seen during training.
-    Computes global metrics across all items (not averaged per-user).
+    Args:
+        model: UNISON model instance
+        eval_loader: DataLoader for WU-CI evaluation episodes
+        device: Device string
 
-    Parameters
-    ----------
-    model : UNISON
-        Model instance.
-    loader : DataLoader
-        Evaluation data loader.
-    device : torch.device
-        Device for computation.
-
-    Returns
-    -------
-    dict
-        WU-CI metrics (MAE, Spearman).
+    Returns:
+        Dictionary with evaluation metrics:
+        - eval_loss: Average loss
+        - mae: Mean Absolute Error
+        - spearman: Spearman correlation
     """
     model.eval()
 
-    all_preds_ci = []
-    all_targets_ci = []
+    total_loss = 0.0
+    mae_list = []
+    spearman_list = []
+    n_batches = 0
 
-    for batch in tqdm(loader, desc="Eval WU-CI", leave=False):
-        with torch.no_grad():
-            # Evaluate using the model's built-in evaluation method
-            res = model.evaluate_warm_user_cold_item(
-                user_ids=batch["id"],
-                items_qry=batch["items_qry"].to(device),
-                scores_qry=batch["scores_qry"].to(device),
-                mask_qry=batch["mask_qry"].to(device),
+    with torch.no_grad():
+        for batch in tqdm(eval_loader, desc="Eval WU-CI", leave=False):
+            items_qry = batch["items_qry"].to(device)
+            scores_qry = batch["scores_qry"].to(device)
+            mask_qry = batch["mask_qry"].to(device)
+            user_ids = batch["id"]
+
+            result = model.evaluate_warm_user_cold_item(
+                user_ids=user_ids,
+                items_qry=items_qry,
+                scores_qry=scores_qry,
+                mask_qry=mask_qry,
             )
 
-            preds = res["pred_real"]  # [B, Q]
-            targets = batch["scores_qry"].to(device)  # [B, Q]
-            masks = batch["mask_qry"].to(device)  # [B, Q]
+            total_loss += float(result["loss_scaled"])
 
-            # Extract only cold items (mask == 3 for WU-CI)
-            mask_ci = masks == 3
-            if mask_ci.any():
-                all_preds_ci.append(preds[mask_ci])
-                all_targets_ci.append(targets[mask_ci])
+            # Extract metrics
+            if "mae_WU_CI" in result:
+                mae_list.append(float(result["mae_WU_CI"]))
+            if "spearman_WU_CI" in result:
+                spearman_list.append(float(result["spearman_WU_CI"]))
 
-    # Concatenate all predictions and targets into single vectors
-    if all_preds_ci:
-        all_preds_ci = torch.cat(all_preds_ci, dim=0)  # [N_total_items]
-        all_targets_ci = torch.cat(all_targets_ci, dim=0)  # [N_total_items]
-
-        # Global MAE
-        mae = torch.abs(all_preds_ci - all_targets_ci).mean().item()
-
-        # Global Spearman correlation
-        if len(all_preds_ci) > 1:
-            try:
-                from scipy.stats import spearmanr
-                corr, _ = spearmanr(
-                    all_preds_ci.cpu().numpy(),
-                    all_targets_ci.cpu().numpy()
-                )
-                spearman = corr if not np.isnan(corr) else 0.0
-            except:
-                spearman = 0.0
-        else:
-            spearman = 0.0
-    else:
-        mae = 0.0
-        spearman = 0.0
+            n_batches += 1
 
     return {
-        "mae": mae,
-        "spearman": spearman,
+        "eval_loss": total_loss / max(n_batches, 1),
+        "mae": np.nanmean(mae_list) if mae_list else float("nan"),
+        "spearman": np.nanmean(spearman_list) if spearman_list else float("nan"),
     }
 
 
-def evaluate_cold_user(model, loader, device):
+def evaluate_cold_user_items(
+    model: UNISON,
+    eval_loader: DataLoader,
+    device: str,
+) -> Dict[str, float]:
     """
-    Evaluate Stage 3: Cold User scenarios.
+    Evaluate Stage 2 on CU-Mixed episodes (cold users, mixed items).
 
-    Evaluates:
-    - CU-WI: Cold User, Warm Item (items seen during training)
-    - CU-CI: Cold User, Cold Item (items not seen during training)
-    - CU-Attr: Cold User, Attribute Prediction
+    Returns separate metrics for CU-WI (cold user, warm item) and
+    CU-CI (cold user, cold item) using the mask codes.
 
-    Computes global metrics across all items (not averaged per-user).
+    Args:
+        model: UNISON model instance
+        eval_loader: DataLoader for CU-Mixed evaluation episodes
+        device: Device string
 
-    Parameters
-    ----------
-    model : UNISON
-        Model instance.
-    loader : DataLoader
-        Evaluation data loader.
-    device : torch.device
-        Device for computation.
-
-    Returns
-    -------
-    dict
-        Cold user metrics (MAE, Spearman for WI/CI, AUC/Acc for attributes).
+    Returns:
+        Dictionary with evaluation metrics:
+        - eval_loss: Average loss
+        - mae_cu_wi: MAE for cold-user warm-item queries
+        - spearman_cu_wi: Spearman for CU-WI
+        - mae_cu_ci: MAE for cold-user cold-item queries
+        - spearman_cu_ci: Spearman for CU-CI
     """
     model.eval()
 
-    # Storage for item prediction metrics
-    all_preds_wi = []
-    all_targets_wi = []
-    all_preds_ci = []
-    all_targets_ci = []
+    total_loss = 0.0
+    mae_wi_list = []
+    spearman_wi_list = []
+    mae_ci_list = []
+    spearman_ci_list = []
+    n_batches = 0
 
-    # Storage for attribute prediction metrics
-    all_attr_preds = []
-    all_attr_targets = []
+    with torch.no_grad():
+        for batch in tqdm(eval_loader, desc="Eval CU-Mixed", leave=False):
+            items_sup = batch["items_sup"].to(device)
+            scores_sup = batch["scores_sup"].to(device)
+            items_qry = batch["items_qry"].to(device)
+            scores_qry = batch["scores_qry"].to(device)
+            mask_qry = batch["mask_qry"].to(device)
 
-    for batch in tqdm(loader, desc="Eval CU", leave=False):
+            result = model.evaluate_cold_user_items(
+                items_sup=items_sup,
+                scores_sup=scores_sup,
+                items_qry=items_qry,
+                scores_qry=scores_qry,
+                mask_qry=mask_qry,
+            )
 
-        # Evaluate item prediction (CU-WI, CU-CI)
-        res_items = model.evaluate_cold_user_items(
-            items_sup=batch["items_sup"].to(device),
-            scores_sup=batch["scores_sup"].to(device),
-            items_qry=batch["items_qry"].to(device),
-            scores_qry=batch["scores_qry"].to(device),
-            mask_qry=batch["mask_qry"].to(device),
-        )
+            total_loss += float(result["loss_scaled"])
 
-        preds = res_items["pred_real"]  # [B, Q]
-        targets = batch["scores_qry"].to(device)  # [B, Q]
-        masks = batch["mask_qry"].to(device)  # [B, Q]
+            # Extract CU-WI metrics (mask code 1)
+            if "mae_CU_WI" in result:
+                mae_wi_list.append(float(result["mae_CU_WI"]))
+            if "spearman_CU_WI" in result:
+                spearman_wi_list.append(float(result["spearman_CU_WI"]))
 
-        # Collect warm items (mask == 1)
-        mask_wi = masks == 1
-        if mask_wi.any():
-            all_preds_wi.append(preds[mask_wi])
-            all_targets_wi.append(targets[mask_wi])
+            # Extract CU-CI metrics (mask code 2)
+            if "mae_CU_CI" in result:
+                mae_ci_list.append(float(result["mae_CU_CI"]))
+            if "spearman_CU_CI" in result:
+                spearman_ci_list.append(float(result["spearman_CU_CI"]))
 
-        # Collect cold items (mask == 2)
-        mask_ci = masks == 2
-        if mask_ci.any():
-            all_preds_ci.append(preds[mask_ci])
-            all_targets_ci.append(targets[mask_ci])
-
-        # Evaluate attribute prediction (CU-Attr)
-        res_attr = model.evaluate_cold_user_attribute(
-            items_sup=batch["items_sup"].to(device),
-            scores_sup=batch["scores_sup"].to(device),
-            target_attr=batch["target_attr"].to(device),
-        )
-
-        # Extract probabilities or logits for AUC computation
-        if "probs" in res_attr:
-            all_attr_preds.append(res_attr["probs"])
-        else:
-            # Binary classification: apply sigmoid to logits
-            all_attr_preds.append(torch.sigmoid(res_attr["logits"]))
-
-        all_attr_targets.append(batch["target_attr"].to(device))
-
-    # ===== Compute CU-WI metrics =====
-    if all_preds_wi:
-        all_preds_wi = torch.cat(all_preds_wi, dim=0)
-        all_targets_wi = torch.cat(all_targets_wi, dim=0)
-
-        mae_wi = torch.abs(all_preds_wi - all_targets_wi).mean().item()
-
-        if len(all_preds_wi) > 1:
-            try:
-                from scipy.stats import spearmanr
-                corr, _ = spearmanr(
-                    all_preds_wi.cpu().numpy(),
-                    all_targets_wi.cpu().numpy()
-                )
-                spearman_wi = corr if not np.isnan(corr) else 0.0
-            except:
-                spearman_wi = 0.0
-        else:
-            spearman_wi = 0.0
-    else:
-        mae_wi = 0.0
-        spearman_wi = 0.0
-
-    # ===== Compute CU-CI metrics =====
-    if all_preds_ci:
-        all_preds_ci = torch.cat(all_preds_ci, dim=0)
-        all_targets_ci = torch.cat(all_targets_ci, dim=0)
-
-        mae_ci = torch.abs(all_preds_ci - all_targets_ci).mean().item()
-
-        if len(all_preds_ci) > 1:
-            try:
-                from scipy.stats import spearmanr
-                corr, _ = spearmanr(
-                    all_preds_ci.cpu().numpy(),
-                    all_targets_ci.cpu().numpy()
-                )
-                spearman_ci = corr if not np.isnan(corr) else 0.0
-            except:
-                spearman_ci = 0.0
-        else:
-            spearman_ci = 0.0
-    else:
-        mae_ci = 0.0
-        spearman_ci = 0.0
-
-    # ===== Compute attribute metrics =====
-    attr_preds = torch.cat(all_attr_preds, dim=0)
-    attr_targets = torch.cat(all_attr_targets, dim=0)
-
-    # Flatten if needed
-    if attr_preds.dim() > 1 and attr_preds.shape[1] == 1:
-        attr_preds = attr_preds.squeeze(1)
-    if attr_targets.dim() > 1:
-        attr_targets = attr_targets.squeeze(1)
-
-    # Accuracy
-    attr_preds_binary = (attr_preds >= 0.5).float()
-    attr_acc = (attr_preds_binary == attr_targets).float().mean().item()
-
-    # AUC
-    try:
-        from sklearn.metrics import roc_auc_score
-        attr_auc = roc_auc_score(
-            attr_targets.cpu().numpy(),
-            attr_preds.cpu().numpy()
-        )
-    except:
-        # Fallback: Mann-Whitney approximation
-        pos = attr_preds[attr_targets == 1]
-        neg = attr_preds[attr_targets == 0]
-        if pos.numel() > 0 and neg.numel() > 0:
-            attr_auc = (pos[:, None] > neg[None, :]).float().mean().item()
-        else:
-            attr_auc = 0.0
+            n_batches += 1
 
     return {
-        "mae_wi": mae_wi,
-        "spearman_wi": spearman_wi,
-        "mae_ci": mae_ci,
-        "spearman_ci": spearman_ci,
-        "attr_auc": attr_auc,
-        "attr_acc": attr_acc,
+        "eval_loss": total_loss / max(n_batches, 1),
+        "mae_cu_wi": np.nanmean(mae_wi_list) if mae_wi_list else float("nan"),
+        "spearman_cu_wi": np.nanmean(spearman_wi_list) if spearman_wi_list else float("nan"),
+        "mae_cu_ci": np.nanmean(mae_ci_list) if mae_ci_list else float("nan"),
+        "spearman_cu_ci": np.nanmean(spearman_ci_list) if spearman_ci_list else float("nan"),
     }
 
 
+def evaluate_cold_user_attributes(
+    model: UNISON,
+    eval_loader: DataLoader,
+    device: str,
+) -> Dict[str, float]:
+    """
+    Evaluate Stage 3 on CU-Mixed episodes (cold users, user attributes).
+
+    Args:
+        model: UNISON model instance
+        eval_loader: DataLoader for CU-Mixed evaluation episodes
+        device: Device string
+
+    Returns:
+        Dictionary with Stage 3 metrics:
+        - attr_eval_loss: Average loss
+        - attr_auc: AUC (for classification)
+        - attr_accuracy: Accuracy (for classification)
+    """
+    model.eval()
+
+    loss_list = []
+    auc_list = []
+    acc_list = []
+
+    with torch.no_grad():
+        for batch in tqdm(eval_loader, desc="Eval CU Attributes", leave=False):
+            items_sup = batch["items_sup"].to(device)
+            scores_sup = batch["scores_sup"].to(device)
+            target_attr = batch["target_attr"].to(device)
+
+            result = model.evaluate_cold_user_attribute(
+                items_sup=items_sup,
+                scores_sup=scores_sup,
+                target_attr=target_attr,
+            )
+
+            # Extract metrics based on task type
+            if model.user_attr_task == "classification":
+                if "loss_bce" in result:
+                    loss_list.append(float(result["loss_bce"]))
+                if "auc" in result:
+                    auc_list.append(float(result["auc"]))
+                if "accuracy" in result:
+                    acc_list.append(float(result["accuracy"]))
+
+    metrics = {}
+    if loss_list:
+        metrics["attr_eval_loss"] = float(np.mean(loss_list))
+    if auc_list:
+        metrics["attr_auc"] = float(np.mean(auc_list))
+    if acc_list:
+        metrics["attr_accuracy"] = float(np.mean(acc_list))
+
+    return metrics
+
+
+# ============================================================
+# MAIN TRAINING LOOP
+# ============================================================
 def main():
-    """Main training loop."""
-    cfg = load_config()
-    device = torch.device(cfg["device"])
+    # Parse arguments
+    parser = argparse.ArgumentParser(description="Train UNISON on Book-Crossing dataset")
+    parser.add_argument(
+        "--config",
+        type=str,
+        default="configs/config_book_crossing.json",
+        help="Path to configuration JSON file"
+    )
+    args = parser.parse_args()
 
-    # ===== 1. Dataset Initialization =====
+    # Load configuration
+    config_path = Path(args.config)
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config file not found: {config_path}")
+
+    with open(config_path, "r") as f:
+        config = json.load(f)
+
+    # Set device
+    device = torch.device(config["training"]["device"] if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}\n")
+
+    # ========== Create DataLoaders ==========
+    print("=" * 60)
+    print("LOADING DATASETS")
+    print("=" * 60)
+
+    train_dataset = EpisodesDataset(
+        config["data"]["train_data_path"],
+        config["data"]["embedding_path"]
+    )
+    val_wu_dataset = EpisodesDataset(
+        config["data"]["val_wu_data_path"],
+        config["data"]["embedding_path"]
+    )
+    val_cu_dataset = EpisodesDataset(
+        config["data"]["val_cu_data_path"],
+        config["data"]["embedding_path"]
+    )
+
+    print(f"WU-WI (train):     {len(train_dataset)} episodes")
+    print(f"WU-CI (eval):      {len(val_wu_dataset)} episodes")
+    print(f"CU-Mixed (eval):   {len(val_cu_dataset)} episodes\n")
+
     train_loader = DataLoader(
-        BookCrossingBagDataset(cfg["data"]["train_path"], cfg["data"]["embeddings"]),
-        batch_size=cfg["data"]["batch_size"],
+        train_dataset,
+        batch_size=config["data"]["batch_size"],
         shuffle=True,
-        collate_fn=collate_bags,
+        num_workers=config["data"]["num_workers"],
+        collate_fn=collate_fn,
     )
-    wu_loader = DataLoader(
-        BookCrossingBagDataset(cfg["data"]["val_wu_path"], cfg["data"]["embeddings"]),
-        batch_size=cfg["data"]["batch_size"],
-        collate_fn=collate_bags,
+    val_wu_loader = DataLoader(
+        val_wu_dataset,
+        batch_size=config["data"]["batch_size"],
+        shuffle=False,
+        num_workers=config["data"]["num_workers"],
+        collate_fn=collate_fn,
     )
-    cu_loader = DataLoader(
-        BookCrossingBagDataset(cfg["data"]["val_cu_path"], cfg["data"]["embeddings"]),
-        batch_size=cfg["data"]["batch_size"],
-        collate_fn=collate_bags,
+    val_cu_loader = DataLoader(
+        val_cu_dataset,
+        batch_size=config["data"]["batch_size"],
+        shuffle=False,
+        num_workers=config["data"]["num_workers"],
+        collate_fn=collate_fn,
     )
 
-    # ===== 2. Model Initialization =====
-    model = Unison(
+    # ========== Create Model ==========
+    print("=" * 60)
+    print("CREATING MODEL")
+    print("=" * 60)
+
+    model = UNISON(
         train_loader=train_loader,
         user_id_key="id",
-        d_in=cfg["model"]["d_in"],
-        d_model=cfg["model"]["d_model"],
-        mlp_hidden=cfg["model"]["mlp_hidden"],
-        mlp_dropout=cfg["model"]["mlp_dropout"],
-        item_task=cfg["model"]["item_task"],
-        scores_range=tuple(cfg["model"]["scores_range"]),
-        is_user_attr_head=cfg["model"]["is_user_attr_head"],
-        user_attr_task=cfg["model"]["user_attr_task"],
-        user_head_out_dim=cfg["model"]["user_head_out_dim"],
-        user_head_hidden=cfg["model"]["user_head_hidden"],
-        user_head_dropout=cfg["model"]["user_head_dropout"],
-        cold_steps=cfg["adaptation"]["steps"],
-        cold_lr=cfg["adaptation"]["lr"],
-        cold_wd=cfg["adaptation"]["weight_decay"],
-        cold_patience=cfg["adaptation"]["patience"],
+        d_in=config["model"]["d_in"],
+        d_model=config["model"]["d_model"],
+        mlp_hidden=tuple(config["model"]["mlp_hidden"]),
+        mlp_dropout=config["model"]["mlp_dropout"],
+        mlp_use_batchnorm=config["model"]["mlp_use_batchnorm"],
+        mlp_use_layernorm=config["model"]["mlp_use_layernorm"],
+        normalize_user=config["model"]["normalize_user"],
+        normalize_item=config["model"]["normalize_item"],
+        item_task=config["task"]["item_task"],
+        binarization_threshold=config["task"]["binarization_threshold"],
+        scores_range=tuple(config["task"]["scores_range"]),
+        is_user_attr_head=config["stage3"]["is_user_attr_head"],
+        user_attr_task=config["stage3"]["user_attr_task"],
+        user_head_out_dim=config["stage3"]["user_head_out_dim"],
+        user_head_hidden=tuple(config["stage3"]["user_head_hidden"]),
+        user_head_dropout=config["stage3"]["user_head_dropout"],
+        user_head_activation=config["stage3"]["user_head_activation"],
+        user_head_use_batchnorm=config["stage3"]["user_head_use_batchnorm"],
+        user_head_use_layernorm=config["stage3"]["user_head_use_layernorm"],
+        cold_steps=config["cold_start"]["cold_steps"],
+        cold_lr=config["cold_start"]["cold_lr"],
+        cold_wd=config["cold_start"]["cold_wd"],
+        cold_patience=config["cold_start"]["cold_patience"],
         device=device,
     ).to(device)
 
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Total parameters:     {total_params:,}")
+    print(f"Trainable parameters: {trainable_params:,}\n")
+
+    # ========== Create Optimizer ==========
     optimizer = torch.optim.Adam(
         model.parameters(),
-        lr=cfg["training"]["lr"],
-        weight_decay=cfg["training"]["weight_decay"],
+        lr=config["training"]["learning_rate"],
+        weight_decay=config["training"]["weight_decay"],
     )
 
-    # ===== 3. Training Loop =====
-    print(f"\nStarting Experiment: {cfg['experiment_name']}\n")
-    print(f"Configuration:")
-    print(f"  Device: {device}")
-    print(f"  Epochs: {cfg['training']['num_epochs']}")
-    print(f"  Learning Rate: {cfg['training']['lr']}")
-    print(f"  Lambda Attr: {cfg['model']['lambda_attr']}")
-    print(f"  Cold Steps: {cfg['adaptation']['steps']}\n")
+    # ========== Create Checkpoint Directory ==========
+    checkpoint_dir = Path(config["output"]["checkpoint_dir"])
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-    for epoch in range(1, cfg["training"]["num_epochs"] + 1):
-        # Training
-        tr_metrics = train_epoch(model, train_loader, optimizer, cfg, device)
+    # ========== Training Loop ==========
+    print("=" * 60)
+    print("TRAINING")
+    print("=" * 60)
+    print(f"Epochs: {config['training']['num_epochs']}")
+    print(f"Learning rate: {config['training']['learning_rate']}")
+    print(f"Lambda (Stage 3): {config['stage3']['lambda_attr']}\n")
 
-        # Evaluation
-        wu_metrics = evaluate_warm_user(model, wu_loader, device)
-        cu_metrics = evaluate_cold_user(model, cu_loader, device)
+    best_wu_ci_loss = float("inf")
 
-        # Logging
-        log_epoch(epoch, tr_metrics, wu_metrics, cu_metrics)
+    for epoch in range(1, config["training"]["num_epochs"] + 1):
+        print(f"\n{'='*60}")
+        print(f"Epoch {epoch}/{config['training']['num_epochs']}")
+        print(f"{'='*60}")
+
+        # Train
+        train_metrics = train_epoch(
+            model,
+            optimizer,
+            train_loader,
+            lambda_attr=config["stage3"]["lambda_attr"],
+            device=device,
+        )
+
+        # Evaluate WU-CI (Stage 2)
+        wu_ci_metrics = evaluate_warm_user_cold_item(model, val_wu_loader, device)
+
+        # Evaluate CU-Mixed (Stage 2)
+        cu_mixed_metrics = evaluate_cold_user_items(model, val_cu_loader, device)
+
+        # Evaluate CU-Mixed (Stage 3)
+        cu_attr_metrics = evaluate_cold_user_attributes(model, val_cu_loader, device)
+
+        # ========== Print Results ==========
+        print("\n" + "-" * 60)
+        print("TRAINING METRICS")
+        print("-" * 60)
+        print(f"Total Loss:       {train_metrics['train_loss']:.4f}")
+        print(f"Rating Loss:      {train_metrics['train_loss_ratings']:.4f}")
+        print(f"Attribute Loss:   {train_metrics['train_loss_attr']:.4f}")
+        if "train_attr_accuracy" in train_metrics:
+            print(f"Attribute Acc:    {train_metrics['train_attr_accuracy']:.4f}")
+
+        print("\n" + "-" * 60)
+        print("EVALUATION: WU-CI (Warm User, Cold Item)")
+        print("-" * 60)
+        print(f"Loss:       {wu_ci_metrics['eval_loss']:.4f}")
+        print(f"MAE:        {wu_ci_metrics['mae']:.4f}")
+        print(f"Spearman:   {wu_ci_metrics['spearman']:.4f}")
+
+        print("\n" + "-" * 60)
+        print("EVALUATION: CU-WI / CU-CI (Cold User, Mixed Items)")
+        print("-" * 60)
+        print(f"Loss:       {cu_mixed_metrics['eval_loss']:.4f}")
+        print(f"\nCU-WI (Cold User, Warm Item):")
+        print(f"  MAE:        {cu_mixed_metrics['mae_cu_wi']:.4f}")
+        print(f"  Spearman:   {cu_mixed_metrics['spearman_cu_wi']:.4f}")
+        print(f"\nCU-CI (Cold User, Cold Item):")
+        print(f"  MAE:        {cu_mixed_metrics['mae_cu_ci']:.4f}")
+        print(f"  Spearman:   {cu_mixed_metrics['spearman_cu_ci']:.4f}")
+
+        print("\n" + "-" * 60)
+        print("EVALUATION: Stage 3 (User Attributes)")
+        print("-" * 60)
+        if cu_attr_metrics:
+            if "attr_eval_loss" in cu_attr_metrics:
+                print(f"Loss:       {cu_attr_metrics['attr_eval_loss']:.4f}")
+            if "attr_auc" in cu_attr_metrics:
+                print(f"AUC:        {cu_attr_metrics['attr_auc']:.4f}")
+            if "attr_accuracy" in cu_attr_metrics:
+                print(f"Accuracy:   {cu_attr_metrics['attr_accuracy']:.4f}")
+        else:
+            print("No Stage 3 metrics available")
+
+    print("\n" + "=" * 60)
+    print("TRAINING COMPLETE")
+    print("=" * 60)
+    print(f"Best WU-CI loss: {best_wu_ci_loss:.4f}")
 
 
 if __name__ == "__main__":

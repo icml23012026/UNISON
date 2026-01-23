@@ -1,30 +1,35 @@
-# UNISON
+# UNISON: Unified Framework for Learning from Scored Bags
 
-## 1. Setup
+Code for the paper "UNISON: A Unified Framework for Learning from Scored Bags".
 
-Before running the scripts, ensure your data is organized as follows:
+## Setup
 
-### Raw Dataset
-Place the original Book-Crossing CSV files in `data/raw/`:
-* `data/raw/Books.csv`
-* `data/raw/Users.csv`
-* `data/raw/Ratings.csv`
-
-### Pre-computed Embeddings
-Place the item embeddings file in the `data/embeddings/` directory:
-* `data/embeddings/item2vec_books_qwen2_5_7b.pkl`
-
-## 2. Run Flow
-Execute these commands in order from the project root:
-
+### 1. Install Dependencies
 ```bash
-# Step 1: Clean raw data
-python -m src.data_prep.clean_book_crossing
+pip install -r requirements.txt
+```
 
-# Step 2: Generate interaction bags (N_SUP=40 and N_SUP=10, needed both)
-python -m src.data_prep.bag_generator_book_crossing --n_sup 40
-python -m src.data_prep.bag_generator_book_crossing --n_sup 10
+### 2. Prepare Data
 
+Place the Book-Crossing dataset in `data/raw/`:
+```
+data/raw/
+├── Books.csv
+├── Users.csv
+└── Ratings.csv
+```
 
-# Step 3: Start training
+Place pre-computed item embeddings in `data/embeddings/`:
+```
+data/embeddings/
+└── item2vec_books_qwen.pkl
+```
+
+## Usage
+Run these commands **in order** from the project root:
+```bash
+# Step 1: Generate interaction bags
+python -m src.data_prep.episode_generator_book_crossing
+
+# Step 2: Start training
 python -m src.scripts.train_book_crossing
