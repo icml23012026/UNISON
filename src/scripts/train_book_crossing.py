@@ -239,37 +239,37 @@ def evaluate_cold_user_items(
     spearman_ci_list = []
     n_batches = 0
 
-    with torch.no_grad():
-        for batch in tqdm(eval_loader, desc="Eval CU-Mixed", leave=False):
-            items_sup = batch["items_sup"].to(device)
-            scores_sup = batch["scores_sup"].to(device)
-            items_qry = batch["items_qry"].to(device)
-            scores_qry = batch["scores_qry"].to(device)
-            mask_qry = batch["mask_qry"].to(device)
 
-            result = model.evaluate_cold_user_items(
-                items_sup=items_sup,
-                scores_sup=scores_sup,
-                items_qry=items_qry,
-                scores_qry=scores_qry,
-                mask_qry=mask_qry,
-            )
+    for batch in tqdm(eval_loader, desc="Eval CU-Mixed", leave=False):
+        items_sup = batch["items_sup"].to(device)
+        scores_sup = batch["scores_sup"].to(device)
+        items_qry = batch["items_qry"].to(device)
+        scores_qry = batch["scores_qry"].to(device)
+        mask_qry = batch["mask_qry"].to(device)
 
-            total_loss += float(result["loss_scaled"])
+        result = model.evaluate_cold_user_items(
+            items_sup=items_sup,
+            scores_sup=scores_sup,
+            items_qry=items_qry,
+            scores_qry=scores_qry,
+            mask_qry=mask_qry,
+        )
 
-            # Extract CU-WI metrics (mask code 1)
-            if "mae_CU_WI" in result:
-                mae_wi_list.append(float(result["mae_CU_WI"]))
-            if "spearman_CU_WI" in result:
-                spearman_wi_list.append(float(result["spearman_CU_WI"]))
+        total_loss += float(result["loss_scaled"])
 
-            # Extract CU-CI metrics (mask code 2)
-            if "mae_CU_CI" in result:
-                mae_ci_list.append(float(result["mae_CU_CI"]))
-            if "spearman_CU_CI" in result:
-                spearman_ci_list.append(float(result["spearman_CU_CI"]))
+        # Extract CU-WI metrics (mask code 1)
+        if "mae_CU_WI" in result:
+            mae_wi_list.append(float(result["mae_CU_WI"]))
+        if "spearman_CU_WI" in result:
+            spearman_wi_list.append(float(result["spearman_CU_WI"]))
 
-            n_batches += 1
+        # Extract CU-CI metrics (mask code 2)
+        if "mae_CU_CI" in result:
+            mae_ci_list.append(float(result["mae_CU_CI"]))
+        if "spearman_CU_CI" in result:
+            spearman_ci_list.append(float(result["spearman_CU_CI"]))
+
+        n_batches += 1
 
     return {
         "eval_loss": total_loss / max(n_batches, 1),
@@ -305,26 +305,25 @@ def evaluate_cold_user_attributes(
     auc_list = []
     acc_list = []
 
-    with torch.no_grad():
-        for batch in tqdm(eval_loader, desc="Eval CU Attributes", leave=False):
-            items_sup = batch["items_sup"].to(device)
-            scores_sup = batch["scores_sup"].to(device)
-            target_attr = batch["target_attr"].to(device)
+    for batch in tqdm(eval_loader, desc="Eval CU Attributes", leave=False):
+        items_sup = batch["items_sup"].to(device)
+        scores_sup = batch["scores_sup"].to(device)
+        target_attr = batch["target_attr"].to(device)
 
-            result = model.evaluate_cold_user_attribute(
-                items_sup=items_sup,
-                scores_sup=scores_sup,
-                target_attr=target_attr,
-            )
+        result = model.evaluate_cold_user_attribute(
+            items_sup=items_sup,
+            scores_sup=scores_sup,
+            target_attr=target_attr,
+        )
 
-            # Extract metrics based on task type
-            if model.user_attr_task == "classification":
-                if "loss_bce" in result:
-                    loss_list.append(float(result["loss_bce"]))
-                if "auc" in result:
-                    auc_list.append(float(result["auc"]))
-                if "accuracy" in result:
-                    acc_list.append(float(result["accuracy"]))
+        # Extract metrics based on task type
+        if model.user_attr_task == "classification":
+            if "loss_bce" in result:
+                loss_list.append(float(result["loss_bce"]))
+            if "auc" in result:
+                auc_list.append(float(result["auc"]))
+            if "accuracy" in result:
+                acc_list.append(float(result["accuracy"]))
 
     metrics = {}
     if loss_list:
