@@ -453,10 +453,6 @@ def main():
         weight_decay=config["training"]["weight_decay"],
     )
 
-    # ========== Create Checkpoint Directory ==========
-    checkpoint_dir = Path(config["output"]["checkpoint_dir"])
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
-
     # ========== Training Loop ==========
     print("=" * 60)
     print("TRAINING")
