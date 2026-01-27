@@ -1,8 +1,8 @@
 {
   "data": {
-    "train_data_path": "episodes_books/N_SUP_10/wu_wi",
-    "val_wu_data_path": "episodes_books/N_SUP_40/wu_ci",
-    "val_cu_data_path": "episodes_books/N_SUP_40/cu_mixed",
+    "train_data_path": "episodes_books/N_SUP_5/wu_wi",
+    "val_wu_data_path": "episodes_books/N_SUP_5/wu_ci",
+    "val_cu_data_path": "episodes_books/N_SUP_5/cu_mixed",
     "embedding_path": "data/embeddings/item2vec_books_qwen.pkl",
     "batch_size": 16,
     "num_workers": 0
@@ -38,7 +38,7 @@
   },
 
   "training": {
-    "num_epochs": 87,
+    "num_epochs": 6,
     "learning_rate": 0.00034,
     "weight_decay": 4.3e-7,
     "device": "cuda"

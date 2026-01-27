@@ -462,12 +462,18 @@ def build_warm_cold_episodes(
     cold_users_set = set(u for u in all_users if u not in warm_users_set)
 
     # ========== Step 3: Random warm/cold split for items (ISBNs) ==========
+    """
     n_items_total = len(all_items_list)
     n_warm_items = int(round(warm_item_ratio * n_items_total))
     n_warm_items = max(0, min(n_warm_items, n_items_total))
 
     warm_items_set = set(rng.sample(all_items_list, n_warm_items))
     cold_items_set = set(i for i in all_items_list if i not in warm_items_set)
+    """
+    isbn_to_year = dict(zip(books_df['ISBN'], books_df['Year']))
+
+    warm_items_set: Set[str] = {isbn for isbn in all_items_list if isbn_to_year.get(isbn, 9999) <= 1997}
+    cold_items_set: Set[str] = {isbn for isbn in all_items_list if isbn_to_year.get(isbn, 0) >= 1998}
 
     # ========== Step 4: Initialize episode containers ==========
     wu_wi_episodes: List[Dict[str, Any]] = []
@@ -696,7 +702,7 @@ if __name__ == "__main__":
 
     # ========== Step 6: Generate episodes for multiple N_SUP values ==========
     # This enables ablation studies on support set size
-    N_SUP_OPTIONS = [10, 40]
+    N_SUP_OPTIONS = [5]
 
     for N_SUP in N_SUP_OPTIONS:
         print(f"\n{'=' * 60}")

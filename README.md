@@ -9,21 +9,20 @@ Code for the paper "UNISON: A Unified Framework for Learning from Scored Bags".
 pip install -r requirements.txt
 ```
 
-### 2. Prepare Data
+### 2. Data
 
-Place the Book-Crossing dataset in `data/raw/`:
+The toy dataset includes:
 ```
-data/raw/
-├── Books.csv
-├── Users.csv
-└── Ratings.csv
+data/
+├── raw/
+│   ├── Books.csv       (20 books)
+│   ├── Users.csv       (10 users)
+│   └── Ratings.csv     (86 ratings)
+└── embeddings/
+    └── item2vec_books_qwen.pkl
 ```
 
-Place pre-computed item embeddings in `data/embeddings/`:
-```
-data/embeddings/
-└── item2vec_books_qwen.pkl
-```
+**Note:** This is a minimal toy dataset.
 
 ## Usage
 Run these commands **in order** from the project root:
