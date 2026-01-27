@@ -16,8 +16,8 @@ The toy dataset includes:
 data/
 ├── raw/
 │   ├── Books.csv       (20 books)
-│   ├── Users.csv       (10 users)
-│   └── Ratings.csv     (86 ratings)
+│   ├── Users.csv       (15 users)
+│   └── Ratings.csv     (165 ratings)
 └── embeddings/
     └── item2vec_books_qwen.pkl
 ```

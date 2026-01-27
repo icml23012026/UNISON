@@ -526,11 +526,6 @@ def main():
         else:
             print("No Stage 3 metrics available")
 
-    print("\n" + "=" * 60)
-    print("TRAINING COMPLETE")
-    print("=" * 60)
-    print(f"Best WU-CI loss: {best_wu_ci_loss:.4f}")
-
 
 if __name__ == "__main__":
     main()

@@ -210,11 +210,21 @@ class UserAttrHead(nn.Module):
 
             in_dim = h_dim
 
+
         # Final output layer (no normalization, activation, or dropout)
         # Returns raw logits for classification or unbounded values for regression
         layers.append(nn.Linear(in_dim, out_dim))
 
         self.net = nn.Sequential(*layers)
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        """Initialize weights for Stage 3 head."""
+        for m in self.net.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
 
     @staticmethod
     def _get_activation(name: str) -> nn.Module:
